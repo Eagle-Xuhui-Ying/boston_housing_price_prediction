@@ -1,0 +1,443 @@
+---
+title: "6 Boston Housing"
+author  : Xuhui Ying
+date    : 08/18/2022 
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: paper
+    highlight: tango
+    df_print: paged
+---
+
+## Background 
+
+You have been hired by the tax authority of the City of Boston to asses Tax Assessments. Your task is to create a model to predict the av_total (assessed value) of properties in the greater Boston area. 
+
+### READ THIS
+
+keep your code organized, I'm not giving you required steps you need to figure out how to build a regression model, explore the data, partition the data etc.  this is just an outline of how i'd approach this problem, you can choose to do something different. this needs to be your own work!!  
+
+## Libraries
+
+load your libraries 
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+options(warn = -1)
+library(ggplot2)
+library(corrplot)
+library(MASS)
+library(skimr)
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(janitor)
+library(statsr)
+library(PerformanceAnalytics)
+library(modelr)
+library(broom)
+library(reshape2)
+
+options(scipen = 999) # turns off scientific notation
+```
+
+
+## Import 
+
+boston.csv 
+zips.csv 
+
+I'd use clean names but it's up to you... 
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+boston <- read_csv("boston.csv") %>% clean_names()
+
+head(boston)
+
+zips <- read_csv("zips.csv") %>% clean_names()
+
+head(zips)
+```
+
+## Explore AV_TOTAL 
+what's the average av_total? 
+
+1. make a histogram of av_total
+2. make a box plot of av_total
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+#sprintf("the average of av_total = %f", mean(boston$av_total, na.rm = T))
+#sprintf("the median of av_total = %f", median(boston$av_total, na.rm = T))
+
+summary(boston$av_total)
+
+boston %>%
+  ggplot(aes(x=av_total)) + 
+  geom_histogram() +
+  labs(title = "histogram of av_total",
+       xlab = "av_total",
+       ylab = "count")
+
+boston %>%
+  ggplot(aes(av_total)) + 
+  geom_boxplot() +
+  coord_flip() +
+  labs(title = "box plot of av_total",
+    x = "av_total")
+```
+
+## Transform 
+
+there are a number of helpful transformations you can make but here is what i'd minamaly do: 
+
+1. join boston to zips on zipcode = zip, 
+  - note zip is character you'll need to convert it to an integer. 
+  
+2. create a home age variable using some form of logic
+
+  - IF yr_remod > yr_built THEN age = 2020 - yr_remod
+  - ELSE age = 2020 - yr_built
+
+```{r, eval=TRUE, message=FALSE, warning=FALSE}
+zips$zip <- as.numeric(zips$zip)
+
+data <- boston %>%
+  inner_join(zips, by = c("zipcode"="zip")) %>%
+  mutate(home_age = if_else(yr_remod > yr_built, 2020-yr_remod, 2020-yr_built))
+
+head(data)
+
+train_prep <- data
+
+head(train_prep)
+
+test_prep <- data
+
+head(test_prep)
+```
+
+## Explore Categorical Variables 
+
+I'd do some kind of null analysis and frequency analysis, what variables can I exclude? 
+
+```{r, eval=TRUE, message=FALSE, warning=FALSE}
+# Remove columns with lots of nulls
+null_count <- function(c){
+  # function to calculate the null count per column
+  sum(is.na(c))
+}
+
+# create a table of column values by count 
+res_00 <- data %>%
+  summarize(across(1:as.numeric(ncol(data)),null_count)) %>% 
+  pivot_longer(cols=1:as.numeric(ncol(data)), names_to ="column", values_to="null_count") %>%
+  mutate(null_pct = null_count / nrow(data))
+
+res_00
+
+# make a table of columns to drop 
+drop_cols <- res_00 %>%
+  filter(null_pct > 0.99) %>%
+  dplyr::select(1)
+
+drop_cols # 0×1的dataset
+
+# filter out the junk columns 
+data_filtered <- data %>%
+  dplyr::select(!drop_cols$column)
+
+#data_filtered
+
+data_filtered %>% skim()
+
+# Frequency Analysis
+freq_long <- data_filtered %>%
+  pivot_longer(cols = is.character, names_to = "column", values_to = "value") %>%
+  dplyr::select(column, value) %>%
+  group_by(column) %>%
+  summarise(count = n(),
+            n_miss = sum(is.na(value)),
+            n_distinct = n_distinct(value)) %>%
+  mutate(count = count - n_miss, pct_distinct = round(n_distinct / count, digits = 4)) %>%
+  arrange(-pct_distinct)
+            
+freq_long
+
+numeric_category_cols <- freq_long %>%
+  filter(n_distinct < 30)
+
+for (c in numeric_category_cols$column){
+#  print(c)
+  P <- data_filtered %>%
+    count(!!as.name(c), sort=TRUE) %>% 
+    ggplot(aes(y=reorder(!!as.name(c),n), x=n)) +
+    geom_col() +
+    labs(title = paste(c,"frequency"), x="count", y=c)
+  print(P)
+}
+
+# drop: structure_class (because n_distinct == 1)
+```
+
+
+
+## Explore Numeric Variables 
+
+I'd do some kind of descriptive statistics analysis, what variables can I exclude? 
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+data_numeric <- data_filtered %>%
+  select_if(is.numeric)
+
+head(data_numeric)
+
+data_numeric %>% skim()
+
+descriptive_stats <- data_numeric %>%
+  pivot_longer(cols = is.numeric, names_to = "column", values_to="value") %>%
+  dplyr::select(column, value) %>%
+  group_by(column) %>%
+  summarise(count = n(),
+            n_miss = sum(is.na(value)),
+            n_distinct = n_distinct(value),
+            mean = round(mean(value, na.rm = TRUE),2),
+            median = median(value, na.rm = TRUE),
+            min = min(value, na.rm = TRUE),
+            max = max(value, na.rm = TRUE),
+            sd = sd(value, na.rm = TRUE),
+            ) 
+
+descriptive_stats
+```
+
+## Correlations 
+ 
+create a correlation matrix of key numeric varaibles like:  av_total, land_sf, living_area, and age. 
+
+hint: you need to deal with  missing values 
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+cor_analysis <- data %>%
+  na.omit() %>%
+  dplyr::select(av_total, land_sf, living_area, home_age) %>%
+  cor() %>%
+  melt() %>% #turn it into a dataframe
+  arrange(desc(value)) 
+ 
+cor_analysis_1 <- data %>%
+  na.omit() %>%
+  dplyr::select(av_total, land_sf, living_area, home_age)
+
+cormat <- cor(cor_analysis_1)
+round(cormat, 2)
+corrplot(cormat)
+
+pairs(cor_analysis_1[1:4])
+
+chart.Correlation(cor_analysis_1,histogram=FALSE,pch=4)
+
+cor_analysis %>%
+  ggplot(aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "black")+ geom_text(aes(label = round(value,2)), color = "white", size = 3) +
+  coord_fixed()
+```
+
+
+## Explore Categorical Predictors 
+
+find 4 categorical variables are likely to be useful in predicting home prices? 
+
+- use a chart comparing the category with av_total, 
+- a useful variable will have differences in the mean of av_total 
+- for example a boxplot of zipcode vs av_total is telling. 
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+data_filtered$zipcode <- as.factor(data_filtered$zipcode)
+
+useful_categorical <- c('city_state', 'r_bldg_styl', 'r_ext_cnd', 'r_view')
+
+for (c in useful_categorical){
+    plt <- data_filtered %>%
+        ggplot(aes(x = !!as.name(c), y = av_total, fill = !!as.name(c))) +
+        geom_boxplot() +
+        theme(axis.text.x=element_text(angle=45, hjust=1))
+    print(plt)
+}
+
+# 4 categorical variables: city_state, r_bldg_styl, r_ext_cnd, r_view
+```
+
+### Prepare your data 
+
+1. select the following columns 
+- pid
+- av_total
+- age 
+- land_sf
+- living_area
+- num_floors
+- population
+- median_income
+- city_state
+
+PLUS your 4 character columns you think will be useful 
+
+2. Convert character columns to factors 
+  - hint: mutate_at(c("var1", ...), as.factor)
+
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+# 4 categorical variables: city_state, r_bldg_styl, r_ext_cnd, r_view
+data_model <-
+  data_filtered %>%
+  na.omit() %>%
+  dplyr::select(pid, av_total, home_age, land_sf, living_area, num_floors, population, median_income, city_state, r_bldg_styl, r_ext_cnd, r_view)
+
+category <- c('city_state', 'r_bldg_styl', 'r_ext_cnd', 'r_view')
+data_model <- data_model %>% mutate_at(category, as.factor)
+
+head(data_model)
+```
+
+## 1. Partition your data 70/30 (train / test split) 
+
+1. split your data set into 70% training and 30% test 
+2. print out the % of each data set
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+set.seed(1234)
+
+9483 * 0.7
+
+sample <- sample.int(n=9483,size=floor(9483*0.7))
+
+# sample
+
+x_train <- train_prep[sample,]
+
+x_train
+
+x_test <- test_prep[-sample,]
+
+x_test
+
+pct_train <- nrow(x_train)/nrow(train_prep)
+sprintf("%1.4f%%", 100*pct_train)
+
+pct_test <- nrow(x_test)/nrow(test_prep)
+sprintf("%1.4f%%", 100*pct_test)
+```
+
+## 2. Train model 1 
+
+for example:
+model_1 <- lm(av_total ~ living_area + age + num_floors, data=train)
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+model_1 <- lm(av_total ~ living_area + home_age + num_floors, data=x_train)
+
+model_1
+
+summary(model_1)
+```
+
+## 3. Train model 2 
+
+for example:
+model_2 <- lm(av_total ~ living_area + age +  num_floors + <other columns>  , data=train)
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+model_2 <- MASS::stepAIC(model_1, direction="both")
+summary(model_2)
+
+model_2 <- lm(formula = av_total ~ home_age + land_sf + living_area + num_floors + population + median_income + city_state + r_bldg_styl + r_ext_cnd + r_view, data=x_train)
+summary(model_2)
+```
+
+## 4. MAKE PREDICTIONS   
+
+make predictions on training and test for each model 
+
+for example, do this 4 times:  
+
+train$model_1_pred <- predict(model1,train)
+
+or use https://modelr.tidyverse.org/reference/add_predictions.html
+
+add_predictions to do the same thing 
+
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+# -- apply the models
+training_1 <- x_train
+training_1 <- add_predictions(training_1, model_1, var="ppg_prediction")
+
+test_1 <- x_test
+test_1 <- add_predictions(test_1, model_1, var="ppg_prediction")
+
+training_1
+test_1
+
+
+training_2 <- x_train
+training_2 <- add_predictions(training_2, model_2, var="ppg_prediction")
+
+test_2 <- x_test
+test_2 <- add_predictions(test_2, model_2, var="ppg_prediction")
+
+training_2
+test_2
+```
+
+
+## 5. Calculate Evaluatation Metrics 
+
+use modelr package or do it by hand but you'll want to calculate for both training and test datasets for each of your two models, you need to be able to explain what these metrics mean. is a large RMSE good or bad? is a large RSQUARE good or bad, how do you interpret RSQUARE?
+mse() rmse() mae() rsquare() 
+
+https://modelr.tidyverse.org/reference/index.html
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+table <- data.frame(
+    row.names = c("training_1", "test_1", "training_2", "test_2"),
+    mse = c(mse(model_1,training_1), mse(model_1,test_1), mse(model_2,training_2), mse(model_2,test_2)),
+    rmse = c(rmse(model_1,training_1), rmse(model_1,test_1), rmse(model_2,training_2), rmse(model_2,test_2)),
+    mae = c(mae(model_1,training_1), mae(model_1,test_1), mae(model_2,training_2), mae(model_2,test_2)),
+    rsquare = c(rsquare(model_1,training_1), rsquare(model_1,test_1), rsquare(model_2,training_2), rsquare(model_2,test_2))
+)
+
+table %>% write_csv("table.csv")
+```
+
+  
+## 6. Which PREDICTIONS did great, over and underestimated av_total?  
+
+using only your TEST partition what are the top 10 houses 
+1. that your best linear regression did the best predicting residual closest to zero 
+2. that your worst linear regression overestimated av_total  
+3. that your worst linear regression underestimated av_total  
+
+
+```{r,eval=TRUE,message=FALSE,warning=FALSE}
+residual <- test_2 %>%
+  na.omit() %>%
+  mutate(compare = if_else(ppg_prediction<av_total, 'underestimated', 'overestimated'), error = av_total - ppg_prediction, abs_error = abs(av_total - ppg_prediction)) %>%
+  dplyr::select(av_total, ppg_prediction, compare, error, abs_error)
+
+residual %>%
+  slice_min(order_by = abs_error, n = 10) %>%
+  dplyr::select(av_total, ppg_prediction, compare, abs_error)
+
+residual %>%
+  slice_min(order_by = error, n = 10) %>%
+  dplyr::select(av_total, ppg_prediction, compare, error)
+  
+residual %>%
+  slice_max(order_by = error, n = 10) %>%
+  dplyr::select(av_total, ppg_prediction, compare, error)
+```
+
+
+your notebook should knit from beginning to end, and should be your own work!!! 
+
